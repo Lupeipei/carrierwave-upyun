@@ -62,9 +62,58 @@ module CarrierWave
         File.new(uploader, self, uploader.cache_path(identifier))
       end
 
-      def delete_dir!(path); end
+      ##
+      # Deletes a cache dir
+      #
+      def delete_dir!(path)
+        base_dir = Rack::Utils.escape_path(path)
+        res = conn.get(base_dir) do |req|
+          req.headers = {
+            "x-list-limit" => '10000', # 不能包含子目录，并且文件数不能大于 10000 文件
+            "accept" => 'application/json'
+          }
+        end
+
+        return if res.status == 404
+        check_put_response!(res)
+
+        result = JSON.parse(res.body)
+        result["files"].each do |file|
+          escaped_path = ::File.join(base_dir, Rack::Utils.escape_path(file["name"]))
+          res = conn.delete(escaped_path) do |req|
+            req.headers = { "x-upyun-async" => "true" }
+          end
+          check_put_response!(res)
+        end
+
+        # 异步删除文件，无法删除目录
+        # res = conn.delete(base_dir)
+        # check_put_response!(res)
+      end
 
       def clean_cache!(seconds); end
+
+      def check_put_response!(res)
+        if res.status != 200
+          # code: 42900007 -> concurrent put or delete
+          json = JSON.parse(res.body)
+          # retry upload
+          raise ConcurrentUploadError, res.body if json["code"] == 42_900_007
+
+          raise UploadError, res.body
+        end
+      end
+
+      def conn
+        @conn ||= begin
+          api_host = uploader.upyun_api_host || DEFAULT_API_URL
+          Faraday.new(url: "#{api_host}/#{uploader.upyun_bucket}") do |req|
+            req.request :basic_auth, uploader.upyun_username, uploader.upyun_password
+            req.request :url_encoded
+            req.adapter Faraday.default_adapter
+          end
+        end
+      end
     end # CloudFiles
   end # Storage
 end # CarrierWave
